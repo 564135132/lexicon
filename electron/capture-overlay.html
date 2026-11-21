@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang='zh-CN'>
+<head>
+  <meta charset='UTF-8' />
+  <title>Lexicon · 框选截图</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #0b0d0c;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    body {
+      cursor: crosshair;
+      font-family: 'Microsoft YaHei UI', 'PingFang SC', 'Noto Sans SC', system-ui, sans-serif;
+    }
+    #shot {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: fill;
+      pointer-events: none;
+    }
+    #hint {
+      position: fixed;
+      top: 24px;
+      left: 50%;
+      z-index: 2;
+      padding: 10px 16px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 999px;
+      background: rgba(13, 18, 15, 0.82);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.32);
+      color: #eff5f1;
+      font-size: 13px;
+      transform: translateX(-50%);
+      backdrop-filter: blur(14px);
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    #hint kbd {
+      display: inline-block;
+      padding: 1px 6px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.06);
+      color: rgba(239, 245, 241, 0.72);
+      font-family: inherit;
+      font-size: 11px;
+    }
+    #selection {
+      position: fixed;
+      z-index: 1;
+      display: none;
+      border: 1px solid rgba(255, 255, 255, 0.9);
+      box-shadow: 0 0 0 9999px rgba(8, 12, 10, 0.46);
+      pointer-events: none;
+    }
+    #size {
+      position: fixed;
+      z-index: 3;
+      display: none;
+      padding: 5px 8px;
+      border-radius: 7px;
+      background: rgba(13, 18, 15, 0.86);
+      color: #eff5f1;
+      font-size: 11px;
+      line-height: 1;
+      pointer-events: none;
+    }
+    #error {
+      position: fixed;
+      inset: 0;
+      z-index: 4;
+      display: none;
+      place-items: center;
+      background: rgba(8, 12, 10, 0.9);
+      color: #eff5f1;
+      font-size: 15px;
+    }
+  </style>
+</head>
+<body>
+  <img id='shot' alt='' draggable='false' />
+  <div id='selection'></div>
+  <div id='size'></div>
+  <div id='hint'>按住鼠标左键拖动，框选要识别的文字 <kbd>Esc</kbd> 取消</div>
+  <div id='error'>无法读取屏幕画面，请按 Esc 取消后重试。</div>
+  <script>
+    const shot = document.getElementById('shot')
+    const selection = document.getElementById('selection')
+    const size = document.getElementById('size')
+    const hint = document.getElementById('hint')
+    const error = document.getElementById('error')
+    let start = null
+    let current = null
+    let dragging = false
+    let submitted = false
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
+
+    function showRect(rect) {
+      current = rect
+      selection.style.display = rect.width || rect.height ? 'block' : 'none'
+      selection.style.left = rect.x + 'px'
+      selection.style.top = rect.y + 'px'
+      selection.style.width = rect.width + 'px'
+      selection.style.height = rect.height + 'px'
+      size.style.display = rect.width > 1 && rect.height > 1 ? 'block' : 'none'
+      size.textContent = Math.round(rect.width) + ' × ' + Math.round(rect.height)
+      size.style.left = clamp(rect.x + rect.width - 62, 8, innerWidth - 80) + 'px'
+      size.style.top = (rect.y + rect.height + 9) + 'px'
+    }
+
+    function reset() {
+      start = null
+      current = null
+      dragging = false
+      selection.style.display = 'none'
+      size.style.display = 'none'
+      hint.textContent = '按住鼠标左键拖动，框选要识别的文字'
+      const key = document.createElement('kbd')
+      key.textContent = 'Esc'
+      hint.append(' ', key, ' 取消')
+    }
+
+    function cancel() {
+      if (submitted) return
+      submitted = true
+      window.captureOverlay.cancel()
+    }
+
+    window.captureOverlay.onInit(({ dataUrl }) => {
+      if (!dataUrl) {
+        error.style.display = 'grid'
+        return
+      }
+      shot.addEventListener('load', () => window.captureOverlay.ready(), { once: true })
+      shot.src = dataUrl
+    })
+
+    window.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || submitted) return
+      event.preventDefault()
+      start = { x: clamp(event.clientX, 0, innerWidth), y: clamp(event.clientY, 0, innerHeight) }
+      dragging = true
+      showRect({ x: start.x, y: start.y, width: 0, height: 0 })
+      hint.textContent = '松开鼠标完成框选'
+    })
+
+    window.addEventListener('pointermove', (event) => {
+      if (!dragging || !start) return
+      const x = clamp(event.clientX, 0, innerWidth)
+      const y = clamp(event.clientY, 0, innerHeight)
+      showRect({
+        x: Math.min(start.x, x),
+        y: Math.min(start.y, y),
+        width: Math.abs(x - start.x),
+        height: Math.abs(y - start.y),
+      })
+    })
+
+    window.addEventListener('pointerup', () => {
+      if (!dragging || !start || submitted) return
+      dragging = false
+      if (!current || current.width < 8 || current.height < 8) {
+        reset()
+        return
+      }
+      submitted = true
+      hint.textContent = '正在识别所选区域…'
+      window.captureOverlay.select(current)
+    })
+
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') cancel()
+    })
+    window.addEventListener('contextmenu', (event) => {
+      event.preventDefault()
+      cancel()
+    })
+    window.addEventListener('pointercancel', cancel)
+  </script>
+</body>
+</html>

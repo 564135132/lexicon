@@ -1,0 +1,69 @@
+{
+  "name": "personal-english-dictionary",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "description": "Lexicon 私人英语词典与桌面置顶速查窗",
+  "author": "Lexicon",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "app:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "desktop:pack": "npm run build && node scripts/build-desktop.mjs dir",
+    "desktop:build": "npm run build && node scripts/build-desktop.mjs nsis"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.3.0",
+    "concurrently": "^10.0.7",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "playwright-core": "^1.65.1",
+    "vite": "^8.3.8",
+    "wait-on": "^9.5.1"
+  },
+  "build": {
+    "appId": "com.lexicon.dictionary",
+    "productName": "Lexicon",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.png",
+      "build/tray.png",
+      "package.json"
+    ],
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Lexicon-${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lexicon 英语词典"
+    }
+  }
+}

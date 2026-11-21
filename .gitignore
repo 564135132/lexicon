@@ -1,0 +1,10 @@
+node_modules
+dist
+release
+.electron-builder-cache
+qa
+*.zip
+.DS_Store
+.env
+.env.*
+!.env.example
