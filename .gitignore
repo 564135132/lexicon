@@ -8,3 +8,6 @@ qa
 .env
 .env.*
 !.env.example
+
+# 本机 API Key 备忘，勿提交
+项目密钥.txt

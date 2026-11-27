@@ -15,6 +15,7 @@ const { cancelCapture, captureRegion, registerCaptureIpc } = require('./capture.
 const { loadApiKeys } = require('./env.cjs')
 const { createSettingsStore } = require('./settings.cjs')
 const { startRendererServer } = require('./server.cjs')
+const { registerAuthStorage } = require('./auth-store.cjs')
 
 const APP_ID = 'com.lexicon.dictionary'
 const RENDERER_PORT = 41730
@@ -28,6 +29,8 @@ fs.mkdirSync(userDataDir, { recursive: true })
 app.setName('Lexicon')
 app.setPath('userData', userDataDir)
 app.setAppUserModelId(APP_ID)
+
+registerAuthStorage(ipcMain, userDataDir)
 
 let mainWindow = null
 let floatingWindow = null

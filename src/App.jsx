@@ -4,9 +4,9 @@ import {
   clearRecentSearches,
   DictionaryNotFoundError,
   fetchSenseRelations,
-  fetchSuggestions,
   fetchWordData,
   getRecentSearches,
+  lookupWord,
 } from './lib/dictionary'
 import {
   isSingleWord,
@@ -14,17 +14,44 @@ import {
   variantLabel,
 } from './lib/text'
 import { displayPartOfSpeech } from './lib/pos'
-import { getPreferredAmericanVoice } from './lib/speech'
-import { ArrowIcon, CloseIcon, ExternalIcon, HistoryIcon, QuoteIcon, RotateIcon, SearchIcon, SparkIcon, VolumeIcon } from './components/Icons'
+import { getPreferredVoice, accentLang } from './lib/speech'
+import {
+  advanceBackgroundPlayback,
+  ALL_BACKGROUND_IDS,
+  createBackgroundPlayback,
+  getSelectedBackgroundIds,
+  photosForIds,
+  saveSelectedBackgroundIds,
+  SCENIC_PHOTOS,
+} from './lib/backgrounds'
+import {
+  emitBackgroundsChanged,
+  emitHistoryAdded,
+  emitHistoryCleared,
+} from './lib/account'
+import { useAccount } from './lib/useAccount'
+import { getSuggestions, rankLocalSuggestions } from './lib/suggest'
+import { warmUpWordList } from './lib/wordlist'
+import { getFavorites, isFavorite as isWordFavorite, removeFavorite, toggleFavorite } from './lib/favorites'
+import { ACCENT_OPTIONS, getPreferences, savePreferences } from './lib/preferences'
+import {
+  ArrowIcon,
+  CheckIcon,
+  CloseIcon,
+  ExternalIcon,
+  HistoryIcon,
+  QuoteIcon,
+  RotateIcon,
+  SearchIcon,
+  SettingsIcon,
+  SparkIcon,
+  StarIcon,
+  VolumeIcon,
+} from './components/Icons'
+import { AccountMenu } from './components/AccountMenu'
 import { FloatingLookup } from './components/FloatingLookup'
 import { TranslatedText } from './components/TranslatedText'
 import { PhraseLine, WordChip, WordLinkText } from './components/WordText'
-
-const SCENIC_PHOTOS = [
-  { src: '/backgrounds/lake.jpg', alt: '' },
-  { src: '/backgrounds/forest.jpg', alt: '' },
-  { src: '/backgrounds/mountains.jpg', alt: '' },
-]
 
 const DEFINITION_PREVIEW_LIMIT = 2
 const EMPTY_WORDS = []
@@ -34,37 +61,133 @@ function SearchForm({
   onChange,
   onSubmit,
   onGenerate,
+  onSelect,
   large = false,
   loading = false,
   generateOpen = false,
   inputRef,
 }) {
+  const [suggestions, setSuggestions] = useState([])
+  const [highlight, setHighlight] = useState(-1)
+  const [focused, setFocused] = useState(false)
+  const typed = value.trim()
+  const open = focused && !loading && suggestions.length > 0
+
+  useEffect(() => {
+    if (!focused || !typed) {
+      setSuggestions([])
+      setHighlight(-1)
+      return undefined
+    }
+
+    let active = true
+    // 本地历史和缓存先给出一版结果，词表加载完后再替换，输入时不会一直空着。
+    setSuggestions(rankLocalSuggestions(typed))
+    setHighlight(-1)
+
+    const timer = window.setTimeout(async () => {
+      const ranked = await getSuggestions(typed)
+      if (!active) return
+      if (ranked.length) setSuggestions(ranked)
+    }, 80)
+
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [typed, focused])
+
+  const chooseSuggestion = (word) => {
+    setSuggestions([])
+    setHighlight(-1)
+    setFocused(false)
+    inputRef?.current?.blur()
+    if (onSelect) onSelect(word)
+    else onChange(word)
+  }
+
+  const handleKeyDown = (event) => {
+    if (!open) return
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setHighlight((index) => (index + 1) % suggestions.length)
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setHighlight((index) => (index <= 0 ? suggestions.length - 1 : index - 1))
+      return
+    }
+    if (event.key === 'Escape') {
+      setSuggestions([])
+      setHighlight(-1)
+      return
+    }
+    if (event.key === 'Enter' && highlight >= 0) {
+      event.preventDefault()
+      chooseSuggestion(suggestions[highlight].word)
+    }
+  }
+
   return (
     <form className={`search-form ${large ? 'search-form--large' : 'search-form--compact'}`} onSubmit={onSubmit} role="search">
       <span className="search-leading" aria-hidden="true"><SearchIcon size={large ? 22 : 18} /></span>
-      <input
-        ref={inputRef}
-        className="search-input"
-        type="search"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        placeholder={large ? '输入一个英文单词…' : '查另一个单词'}
-        aria-label="搜索英文单词"
-        autoComplete="off"
-        spellCheck="false"
-      />
-      {value && (
-        <button
-          className="search-clear"
-          type="button"
-          onClick={() => {
-            onChange('')
-            inputRef?.current?.focus()
-          }}
-          aria-label="清空搜索"
+      <div className="search-field">
+        <input
+          ref={inputRef}
+          className="search-input"
+          type="search"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onKeyDown={handleKeyDown}
+          placeholder={large ? '输入一个英文单词…' : '查另一个单词'}
+          aria-label="搜索英文单词"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={open}
+          aria-controls={open ? 'search-suggestions' : undefined}
+          aria-activedescendant={highlight >= 0 ? `search-suggestion-${highlight}` : undefined}
+          autoComplete="off"
+          spellCheck="false"
+        />
+        {value && (
+          <button
+            className="search-clear"
+            type="button"
+            onClick={() => {
+              onChange('')
+              inputRef?.current?.focus()
+            }}
+            aria-label="清空搜索"
+          >
+            <CloseIcon size={14} />
+          </button>
+        )}
+      </div>
+      {open && (
+        <ul
+          className="search-suggest"
+          id="search-suggestions"
+          role="listbox"
+          aria-label="拼写建议"
+          onMouseDown={(event) => event.preventDefault()}
         >
-          <CloseIcon size={14} />
-        </button>
+          {suggestions.map((item, index) => (
+            <li
+              key={item.word}
+              id={`search-suggestion-${index}`}
+              role="option"
+              aria-selected={index === highlight}
+              className={`search-suggest-item ${index === highlight ? 'search-suggest-item--active' : ''}`}
+              onMouseEnter={() => setHighlight(index)}
+              onClick={() => chooseSuggestion(item.word)}
+            >
+              <span className="search-suggest-word">{item.word}</span>
+            </li>
+          ))}
+        </ul>
       )}
       <button
         className={`search-generate ${generateOpen ? 'search-generate--open' : ''}`}
@@ -85,31 +208,206 @@ function SearchForm({
   )
 }
 
-function ScenicBackground({ reading }) {
-  const [active, setActive] = useState(0)
+function ScenicBackground({ reading, photos }) {
+  const [playback, setPlayback] = useState(() => createBackgroundPlayback(photos))
+
+  const current = playback.order[playback.cursor] ?? photos[0]
+  const previous = playback.previousId
+    ? photos.find((photo) => photo.id === playback.previousId) ?? null
+    : null
 
   useEffect(() => {
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    if (reduceMotion || reading) return undefined
+    if (photos.length < 2 || reading) return undefined
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return undefined
     const timer = window.setInterval(() => {
-      setActive((value) => (value + 1) % SCENIC_PHOTOS.length)
+      setPlayback((value) => advanceBackgroundPlayback(value, photos))
     }, 11000)
     return () => window.clearInterval(timer)
-  }, [reading])
+  }, [photos, reading])
+
+  useEffect(() => {
+    const next = playback.order[(playback.cursor + 1) % playback.order.length]
+    if (!next?.src) return undefined
+    const image = new Image()
+    image.src = next.src
+    return undefined
+  }, [playback])
 
   return (
     <div className={`scenic-backdrop ${reading ? 'scenic-backdrop--reading' : ''}`} aria-hidden="true">
-      {SCENIC_PHOTOS.map((photo, index) => (
+      {previous && (
         <img
-          key={photo.src}
-          className={`scenic-photo ${index === active ? 'scenic-photo--active' : ''}`}
-          src={photo.src}
+          key={`previous-${previous.id}`}
+          className="scenic-photo scenic-photo--previous"
+          src={previous.src}
           alt=""
-          loading={index === 0 ? 'eager' : 'lazy'}
-          fetchPriority={index === 0 ? 'high' : 'low'}
         />
-      ))}
+      )}
+      {current && (
+        <img
+          key={`current-${current.id}`}
+          className="scenic-photo scenic-photo--active"
+          src={current.src}
+          alt=""
+          fetchPriority="high"
+        />
+      )}
       <div className="scenic-wash" />
+    </div>
+  )
+}
+
+const SETTINGS_TABS = [
+  { id: 'backgrounds', label: '背景图片' },
+  { id: 'favorites', label: '收藏单词' },
+  { id: 'preferences', label: '使用偏好' },
+]
+
+function SettingsPanel({
+  tab,
+  onTabChange,
+  selectedIds,
+  notice,
+  onToggle,
+  onSelectAll,
+  favorites,
+  onOpenFavorite,
+  onRemoveFavorite,
+  accent,
+  onAccentChange,
+  onClose,
+}) {
+  const allSelected = selectedIds.length === SCENIC_PHOTOS.length
+  const currentTab = SETTINGS_TABS.find((item) => item.id === tab) || SETTINGS_TABS[0]
+
+  return (
+    <div className="settings-panel" role="dialog" aria-label="设置">
+      <div className="settings-head">
+        <div>
+          <span className="settings-kicker">设置</span>
+          <strong>{currentTab.label}</strong>
+        </div>
+        <button type="button" className="settings-close" onClick={onClose} aria-label="关闭设置">
+          <CloseIcon size={14} />
+        </button>
+      </div>
+
+      <div className="settings-tabs" role="tablist" aria-label="设置分类">
+        {SETTINGS_TABS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            className={`settings-tab ${tab === item.id ? 'settings-tab--active' : ''}`}
+            onClick={() => onTabChange(item.id)}
+          >
+            {item.label}
+            {item.id === 'favorites' && favorites.length > 0 && <b>{favorites.length}</b>}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'backgrounds' && (
+        <div className="settings-section">
+          <div className="settings-section-head">
+            <p>勾选喜欢的风景图片，背景会在已选图片中自动轮播。</p>
+            <button
+              type="button"
+              className="settings-select-all"
+              onClick={onSelectAll}
+              disabled={allSelected}
+            >
+              {allSelected ? '已全选' : '全选'}
+            </button>
+          </div>
+          <div className="background-grid">
+            {SCENIC_PHOTOS.map((photo) => {
+              const checked = selectedIds.includes(photo.id)
+              return (
+                <label key={photo.id} className={`background-option ${checked ? 'background-option--checked' : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => onToggle(photo.id)}
+                    aria-label={photo.label}
+                  />
+                  <img src={photo.src} alt="" loading="lazy" decoding="async" />
+                  <span className="background-label">{photo.label}</span>
+                  <span className="background-check" aria-hidden="true">
+                    {checked && <CheckIcon size={12} />}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+          <div className="settings-footer" aria-live="polite">
+            <span>已选 {selectedIds.length} / {SCENIC_PHOTOS.length} 张</span>
+            {notice && <span className="settings-notice" role="status">{notice}</span>}
+          </div>
+        </div>
+      )}
+
+      {tab === 'favorites' && (
+        <div className="settings-section">
+          <div className="settings-section-head">
+            <p>查词时点击单词旁的小星星即可收藏；点击下面的单词直接查询。</p>
+          </div>
+          {favorites.length === 0 ? (
+            <p className="settings-empty">还没有收藏的单词。</p>
+          ) : (
+            <ul className="favorite-list">
+              {favorites.map((item) => (
+                <li key={item.word} className="favorite-item">
+                  <button
+                    type="button"
+                    className="favorite-word"
+                    onClick={() => onOpenFavorite(item.word)}
+                    title={`查询“${item.word}”`}
+                  >
+                    {item.word}
+                  </button>
+                  <button
+                    type="button"
+                    className="favorite-remove"
+                    onClick={() => onRemoveFavorite(item.word)}
+                    aria-label={`取消收藏 ${item.word}`}
+                    title="取消收藏"
+                  >
+                    <StarIcon size={14} filled />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {tab === 'preferences' && (
+        <div className="settings-section">
+          <div className="settings-section-head">
+            <p>发音偏好决定查词时自动朗读、以及例句朗读使用的口音。</p>
+          </div>
+          <div className="accent-options" role="radiogroup" aria-label="发音偏好">
+            {ACCENT_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                role="radio"
+                aria-checked={accent === option.id}
+                className={`accent-option ${accent === option.id ? 'accent-option--active' : ''}`}
+                onClick={() => onAccentChange(option.id)}
+              >
+                <span>{option.label}</span>
+                <small>{option.hint}</small>
+              </button>
+            ))}
+          </div>
+          <p className="settings-hint">
+            英音使用系统语音合成；词典自带的发音录音仍是美式。系统没有装英音语音时会自动回退。
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -146,13 +444,14 @@ function SearchHistory({ recent, open, onLookup, onClear }) {
   )
 }
 
-function Hero({ query, setQuery, onSubmit, onGenerate, loading, generateOpen, inputRef }) {
+function Hero({ query, setQuery, onSubmit, onSelect, onGenerate, loading, generateOpen, inputRef }) {
   return (
     <section className="hero" aria-label="词典搜索">
       <SearchForm
         value={query}
         onChange={setQuery}
         onSubmit={onSubmit}
+        onSelect={onSelect}
         onGenerate={onGenerate}
         large
         loading={loading}
@@ -413,7 +712,7 @@ function AsideSection({ title, count, children }) {
   )
 }
 
-function EntryView({ data, activePos, setActivePos, onLookup }) {
+function EntryView({ data, activePos, setActivePos, onLookup, favorite, onToggleFavorite, accent = 'us' }) {
   const { entry, extras } = data
   const [isPlaying, setIsPlaying] = useState(false)
   const [speakingExample, setSpeakingExample] = useState(null)
@@ -435,10 +734,10 @@ function EntryView({ data, activePos, setActivePos, onLookup }) {
     }
     window.speechSynthesis.cancel()
     const utterance = new window.SpeechSynthesisUtterance(entry.word)
-    utterance.lang = 'en-US'
+    utterance.lang = accentLang(accent)
     utterance.rate = 0.9
     utterance.pitch = 1
-    const voice = getPreferredAmericanVoice()
+    const voice = getPreferredVoice(accent)
     if (voice) utterance.voice = voice
     utterance.onstart = () => {
       if (token === speechTokenRef.current) setIsPlaying(true)
@@ -450,7 +749,7 @@ function EntryView({ data, activePos, setActivePos, onLookup }) {
       if (token === speechTokenRef.current) setIsPlaying(false)
     }
     window.speechSynthesis.speak(utterance)
-  }, [entry.word])
+  }, [entry.word, accent])
 
   const playPronunciation = useCallback(() => {
     window.speechSynthesis?.cancel()
@@ -487,10 +786,10 @@ function EntryView({ data, activePos, setActivePos, onLookup }) {
     if (!window.speechSynthesis || typeof window.SpeechSynthesisUtterance === 'undefined') return
 
     const utterance = new window.SpeechSynthesisUtterance(text)
-    utterance.lang = 'en-US'
+    utterance.lang = accentLang(accent)
     utterance.rate = 0.92
     utterance.pitch = 1
-    const voice = getPreferredAmericanVoice()
+    const voice = getPreferredVoice(accent)
     if (voice) utterance.voice = voice
     utterance.onstart = () => {
       if (token === speechTokenRef.current) setSpeakingExample(id)
@@ -502,7 +801,7 @@ function EntryView({ data, activePos, setActivePos, onLookup }) {
       if (token === speechTokenRef.current) setSpeakingExample(null)
     }
     window.speechSynthesis.speak(utterance)
-  }, [speakingExample])
+  }, [speakingExample, accent])
 
   useEffect(() => {
     setIsPlaying(false)
@@ -528,17 +827,29 @@ function EntryView({ data, activePos, setActivePos, onLookup }) {
       )}
       <header className="entry-head">
         <div className="entry-title-block">
-          <h2 className="entry-word">{entry.word}</h2>
+          <div className="entry-word-row">
+            <h2 className="entry-word">{entry.word}</h2>
+            <button
+              type="button"
+              className={`favorite-button ${favorite ? 'favorite-button--active' : ''}`}
+              onClick={onToggleFavorite}
+              aria-pressed={favorite}
+              aria-label={favorite ? '取消收藏这个单词' : '收藏这个单词'}
+              title={favorite ? '取消收藏' : '收藏这个单词'}
+            >
+              <StarIcon size={19} filled={favorite} />
+            </button>
+          </div>
           <div className="entry-meta">
             <span className="phonetic">{entry.phonetic}</span>
             <button
               type="button"
               className={`audio-button ${isPlaying ? 'audio-button--playing' : ''}`}
               onClick={playPronunciation}
-              aria-label="播放美式发音"
+              aria-label={accent === 'uk' ? '播放英式发音' : '播放美式发音'}
             >
               <VolumeIcon size={17} />
-              <span>{isPlaying ? '正在播放' : '美音'}</span>
+              <span>{isPlaying ? '正在播放' : accent === 'uk' ? '英音' : '美音'}</span>
             </button>
             <span className="meta-dot" aria-hidden="true">·</span>
             <span>{entry.meanings.length} 个词性</span>
@@ -654,24 +965,47 @@ export default function App() {
   const [status, setStatus] = useState('idle')
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
+  const [redirect, setRedirect] = useState(null)
   const [recent, setRecent] = useState(() => getRecentSearches())
   const [activePos, setActivePos] = useState('all')
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState('backgrounds')
+  const [selectedBackgroundIds, setSelectedBackgroundIds] = useState(() => getSelectedBackgroundIds())
+  const [settingsNotice, setSettingsNotice] = useState('')
+  const [favorites, setFavorites] = useState(() => getFavorites())
+  const [preferences, setPreferences] = useState(() => getPreferences())
   const [floatingOpen, setFloatingOpen] = useState(false)
   const requestId = useRef(0)
   const resultRef = useRef(null)
   const searchInputRef = useRef(null)
   const historyRef = useRef(null)
+  const settingsRef = useRef(null)
+  const selectedBackgrounds = useMemo(
+    () => photosForIds(selectedBackgroundIds),
+    [selectedBackgroundIds],
+  )
+  const account = useAccount({
+    onHistoryMerged: (words) => setRecent(words),
+    onBackgroundsMerged: (ids) => setSelectedBackgroundIds(ids),
+    onFavoritesMerged: (items) => setFavorites(items),
+  })
+
+  // 提前加载拼写建议用的常用词表，输入时就不用等文件请求。
+  useEffect(() => {
+    warmUpWordList()
+  }, [])
 
   const performSearch = useCallback(async (rawWord, options = {}) => {
     const word = normalizeWord(rawWord)
     if (!word) return
 
-    const { pushHistory = true, scroll = true } = options
+    const { pushHistory = true, scroll = true, allowRedirect = true } = options
     setQuery(word)
     setSearchedWord(word)
     setActivePos('all')
     setError(null)
+    setRedirect(null)
     setData(null)
     setStatus('loading')
 
@@ -698,21 +1032,35 @@ export default function App() {
 
     const currentRequest = ++requestId.current
     try {
-      const result = await fetchWordData(word)
+      const loaded = allowRedirect
+        ? await lookupWord(word)
+        : { data: await fetchWordData(word, { skipMerriam: true }), redirectFrom: null }
       if (currentRequest !== requestId.current) return
+      const result = loaded.data
+      const targetWord = result.entry.word
       setData(result)
       setStatus('success')
-      setRecent(addRecentSearch(word))
-      document.title = `${result.entry.word}｜Lexicon`
+      setRecent(addRecentSearch(targetWord))
+      emitHistoryAdded(targetWord)
+      document.title = `${targetWord}｜Lexicon`
+
+      if (loaded.redirectFrom) {
+        // 变形词自动跳转到原形：同步输入框、标题和地址栏。
+        // 用 replaceState，避免“went → go”在历史记录里留下两条。
+        setRedirect({ from: loaded.redirectFrom, to: targetWord })
+        setQuery(targetWord)
+        setSearchedWord(targetWord)
+        window.history.replaceState({ word: targetWord }, '', `?q=${encodeURIComponent(targetWord)}`)
+      }
     } catch (caught) {
       if (currentRequest !== requestId.current) return
       if (caught instanceof DictionaryNotFoundError) {
-        const suggestions = await fetchSuggestions(word)
+        const ranked = await getSuggestions(word)
         if (currentRequest !== requestId.current) return
         setError({
           kind: 'not-found',
           message: '可能是拼写有误，或者词典尚未收录这个词。',
-          suggestions,
+          suggestions: ranked.map((item) => item.word),
         })
       } else {
         setError({
@@ -776,20 +1124,78 @@ export default function App() {
     }
   }, [historyOpen])
 
+  useEffect(() => {
+    if (!settingsOpen) return undefined
+    const closeOnOutsideClick = (event) => {
+      if (!settingsRef.current?.contains(event.target)) setSettingsOpen(false)
+    }
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setSettingsOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [settingsOpen])
+
+  const handleToggleBackground = (photoId) => {
+    const isSelected = selectedBackgroundIds.includes(photoId)
+    if (isSelected && selectedBackgroundIds.length === 1) {
+      setSettingsNotice('至少保留一张背景图片')
+      return
+    }
+    const next = isSelected
+      ? selectedBackgroundIds.filter((id) => id !== photoId)
+      : [...selectedBackgroundIds, photoId]
+    setSelectedBackgroundIds(saveSelectedBackgroundIds(next))
+    emitBackgroundsChanged()
+    setSettingsNotice('')
+  }
+
+  const handleSelectAllBackgrounds = () => {
+    setSelectedBackgroundIds(saveSelectedBackgroundIds(ALL_BACKGROUND_IDS))
+    emitBackgroundsChanged()
+    setSettingsNotice('')
+  }
+
+  const handleToggleFavorite = useCallback((word) => {
+    if (!word) return
+    setFavorites(toggleFavorite(word))
+  }, [])
+
+  const handleRemoveFavorite = useCallback((word) => {
+    setFavorites(removeFavorite(word))
+  }, [])
+
+  const handleOpenFavorite = useCallback((word) => {
+    setSettingsOpen(false)
+    setHistoryOpen(false)
+    performSearch(word)
+  }, [performSearch])
+
+  const handleAccentChange = useCallback((accent) => {
+    setPreferences(savePreferences({ accent }))
+  }, [])
+
   const handleSubmit = (event) => {
     event.preventDefault()
+    setSettingsOpen(false)
     setFloatingOpen(false)
     performSearch(query)
   }
 
   const handleLookup = (word) => {
     setHistoryOpen(false)
+    setSettingsOpen(false)
     setFloatingOpen(false)
     performSearch(word)
   }
 
   const handleGenerate = () => {
     setHistoryOpen(false)
+    setSettingsOpen(false)
     if (window.desktopApp?.openFloatingLookup) {
       setFloatingOpen(false)
       void window.desktopApp.openFloatingLookup(query)
@@ -813,6 +1219,7 @@ export default function App() {
     setQuery('')
     setActivePos('all')
     setHistoryOpen(false)
+    setSettingsOpen(false)
     setFloatingOpen(false)
     document.title = 'Lexicon｜私人英语词典'
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -821,6 +1228,7 @@ export default function App() {
 
   const handleClearRecent = () => {
     setRecent(clearRecentSearches())
+    emitHistoryCleared()
   }
 
   const isLoading = status === 'loading'
@@ -828,33 +1236,76 @@ export default function App() {
 
   return (
     <div className={`app-shell ${isReading ? 'app-shell--reading' : ''}`}>
-      <ScenicBackground reading={isReading} />
+      <ScenicBackground
+        key={selectedBackgrounds.map((photo) => photo.id).join('|')}
+        reading={isReading}
+        photos={selectedBackgrounds}
+      />
       <header className="site-header">
-        <a className="brand" href="/" onClick={handleHome}>
-          <span className="brand-mark" aria-hidden="true">L</span>
-          <span className="brand-copy">
-            <span className="brand-name">Lexicon</span>
-            <span className="brand-sub">私人英语词典</span>
-          </span>
-        </a>
-        <div className="header-actions" ref={historyRef}>
+        <div className="brand-area" ref={settingsRef}>
+          <a className="brand" href="/" onClick={handleHome}>
+            <span className="brand-mark" aria-hidden="true">L</span>
+            <span className="brand-copy">
+              <span className="brand-name">Lexicon</span>
+              <span className="brand-sub">私人英语词典</span>
+            </span>
+          </a>
           <button
             type="button"
-            className={`history-trigger ${historyOpen ? 'history-trigger--open' : ''}`}
-            onClick={() => setHistoryOpen((value) => !value)}
-            aria-expanded={historyOpen}
+            className={`appearance-toggle ${settingsOpen ? 'appearance-toggle--open' : ''}`}
+            onClick={() => {
+              setHistoryOpen(false)
+              setSettingsNotice('')
+              setSettingsOpen((value) => !value)
+            }}
+            aria-expanded={settingsOpen}
             aria-haspopup="dialog"
+            aria-label="设置"
+            title="背景图片、收藏单词与发音偏好"
           >
-            <HistoryIcon size={16} />
-            <span>历史</span>
-            {recent.length > 0 && <b>{recent.length}</b>}
+            <SettingsIcon size={16} />
           </button>
-          <SearchHistory
-            recent={recent}
-            open={historyOpen}
-            onLookup={handleLookup}
-            onClear={handleClearRecent}
-          />
+          {settingsOpen && (
+            <SettingsPanel
+              tab={settingsTab}
+              onTabChange={setSettingsTab}
+              selectedIds={selectedBackgroundIds}
+              notice={settingsNotice}
+              onToggle={handleToggleBackground}
+              onSelectAll={handleSelectAllBackgrounds}
+              favorites={favorites}
+              onOpenFavorite={handleOpenFavorite}
+              onRemoveFavorite={handleRemoveFavorite}
+              accent={preferences.accent}
+              onAccentChange={handleAccentChange}
+              onClose={() => setSettingsOpen(false)}
+            />
+          )}
+        </div>
+        <div className="header-actions">
+          <AccountMenu account={account} />
+          <div className="history-area" ref={historyRef}>
+            <button
+              type="button"
+              className={`history-trigger ${historyOpen ? 'history-trigger--open' : ''}`}
+              onClick={() => {
+                setSettingsOpen(false)
+                setHistoryOpen((value) => !value)
+              }}
+              aria-expanded={historyOpen}
+              aria-haspopup="dialog"
+            >
+              <HistoryIcon size={16} />
+              <span>历史</span>
+              {recent.length > 0 && <b>{recent.length}</b>}
+            </button>
+            <SearchHistory
+              recent={recent}
+              open={historyOpen}
+              onLookup={handleLookup}
+              onClear={handleClearRecent}
+            />
+          </div>
         </div>
       </header>
 
@@ -864,6 +1315,7 @@ export default function App() {
             query={query}
             setQuery={setQuery}
             onSubmit={handleSubmit}
+            onSelect={handleLookup}
             onGenerate={handleGenerate}
             loading={isLoading}
             generateOpen={floatingOpen}
@@ -875,6 +1327,7 @@ export default function App() {
               value={query}
               onChange={setQuery}
               onSubmit={handleSubmit}
+              onSelect={handleLookup}
               onGenerate={handleGenerate}
               loading={isLoading}
               generateOpen={floatingOpen}
@@ -891,6 +1344,21 @@ export default function App() {
           aria-busy={isLoading}
         >
           {status === 'loading' && <LoadingState word={searchedWord} />}
+          {status === 'success' && data && redirect && (
+            <div className="redirect-note" role="status">
+              <span className="redirect-badge">词形</span>
+              <p>
+                「<strong>{redirect.from}</strong>」是「<strong>{redirect.to}</strong>」的变形，已自动跳转到原形。
+                <button
+                  type="button"
+                  className="redirect-link"
+                  onClick={() => performSearch(redirect.from, { allowRedirect: false })}
+                >
+                  查看 {redirect.from} 词条
+                </button>
+              </p>
+            </div>
+          )}
           {status === 'error' && error && (
             <ErrorState
               error={error}
@@ -905,6 +1373,9 @@ export default function App() {
               activePos={activePos}
               setActivePos={setActivePos}
               onLookup={handleLookup}
+              favorite={isWordFavorite(data.entry.word)}
+              onToggleFavorite={() => handleToggleFavorite(data.entry.word)}
+              accent={preferences.accent}
             />
           )}
         </section>

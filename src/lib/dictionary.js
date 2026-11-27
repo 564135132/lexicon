@@ -4,6 +4,8 @@ import {
   sortMeanings,
   uniqueWords,
 } from './text'
+import { candidateLemmas, orderLemmas } from './morphology'
+import { loadCommonWords } from './wordlist'
 
 const DICTIONARY_ENDPOINT = '/api/dictionary/en'
 const DATAMUSE_ENDPOINT = '/api/datamuse'
@@ -13,10 +15,10 @@ const MW_SOURCE_NAMES = {
   learners: "Merriam-Webster's Learner's Dictionary",
   collegiate: "Merriam-Webster's Collegiate Dictionary",
 }
-const CACHE_PREFIX = 'lexicon:data:v6:'
+const CACHE_PREFIX = 'lexicon:data:v7:'
 const SENSE_CACHE_PREFIX = 'lexicon:sense:v4:'
 const RECENT_KEY = 'lexicon:recent:v1'
-const RECENT_LIMIT = 100
+export const RECENT_LIMIT = 100
 const CACHE_TTL = 1000 * 60 * 60 * 24 * 7
 const REQUEST_TIMEOUT = 12000
 
@@ -386,23 +388,69 @@ function normalizeMerriamEntry(entries, fallbackWord, product) {
   }
 }
 
+function merriamId(entry) {
+  return String(entry?.meta?.id || '').toLowerCase().replace(/:\d+$/, '')
+}
+
+// 判断 MW 返回的条目是不是某个原形的变形。MW 的响应里会附带不少相关词条，
+// 所以只看第一条：
+// 1) 第一条的 id 就已经是另一个词（bigger → big、happier → happy）；
+// 2) 第一条是交叉引用条目（没有词性，如 went、mice），从 meta.stems 里找原形。
+function detectMerriamLemma(entries, word) {
+  const first = entries[0]
+  const firstId = merriamId(first)
+  if (firstId && firstId !== word) {
+    return /^[a-z]+$/.test(firstId) ? firstId : ''
+  }
+  if (first?.fl) return ''
+
+  const stems = Array.isArray(first?.meta?.stems) ? first.meta.stems : []
+  for (const stem of stems) {
+    const candidate = String(stem).toLowerCase()
+    if (candidate !== word && candidate.length > 1 && /^[a-z]+$/.test(candidate)) return candidate
+  }
+  return ''
+}
+
 async function fetchMerriamEntry(word) {
+  let pendingLemma = ''
+
   for (const product of MW_PRODUCTS) {
+    let entries = []
     try {
       const payload = await fetchJson(MW_PROXY_ENDPOINT + '/' + product + '/' + encodeURIComponent(word))
-      const entries = Array.isArray(payload)
-        ? payload.filter((entry) => (
-            entry
-            && typeof entry === 'object'
-            && String(entry.meta?.id || '').toLowerCase().replace(/:\d+$/, '') === word
-          ))
+      entries = Array.isArray(payload)
+        ? payload.filter((entry) => entry && typeof entry === 'object' && entry.meta)
         : []
-      if (entries.length) return normalizeMerriamEntry(entries, word, product)
     } catch {
-      // Try the next Merriam-Webster product, then the free Wiktionary fallback.
+      continue
+    }
+    if (!entries.length) continue
+
+    const lemma = detectMerriamLemma(entries, word)
+    if (lemma && lemma !== word) {
+      const baseEntries = entries.filter((entry) => merriamId(entry) === lemma)
+      if (baseEntries.length) {
+        try {
+          return { entry: normalizeMerriamEntry(baseEntries, word, product), lemma }
+        } catch {
+          // 原形条目没有可用释义时继续尝试下一个词典。
+        }
+      }
+      pendingLemma = pendingLemma || lemma
+      continue
+    }
+
+    const exactEntries = entries.filter((entry) => merriamId(entry) === word)
+    if (!exactEntries.length) continue
+    try {
+      return { entry: normalizeMerriamEntry(exactEntries, word, product), lemma: '' }
+    } catch {
+      // 例如 children 这类只有交叉引用、没有释义的条目，交给后面的备用词典。
     }
   }
-  return null
+
+  return { entry: null, lemma: pendingLemma }
 }
 
 function shapePhrases(candidates, word) {
@@ -521,8 +569,11 @@ function attachMwRelations(entry, extras) {
   }
 }
 
-export async function fetchWordData(word) {
-  const cached = readCache(word)
+export async function fetchWordData(word, { skipMerriam = false } = {}) {
+  // 查看变形词本身的词条时跳过 MW：MW 会把 went 直接换成 go，
+  // 这里需要 Wiktionary 里以 went 为词头的条目。
+  const cacheKey = skipMerriam ? `${word}~inflected` : word
+  const cached = readCache(cacheKey)
   if (cached) return cached
 
   const extrasRequest = fetchExtras(word).catch(() => ({
@@ -533,7 +584,13 @@ export async function fetchWordData(word) {
     antonyms: {},
   }))
 
-  let entry = await fetchMerriamEntry(word)
+  const merriam = skipMerriam
+    ? { entry: null, lemma: '' }
+    : await fetchMerriamEntry(word).catch(() => ({ entry: null, lemma: '' }))
+  let entry = merriam.entry
+  // Merriam-Webster 自己的重定向最可靠；它没有收录时再用后缀规则猜原形。
+  let lemmas = merriam.lemma ? [merriam.lemma] : []
+
   if (!entry) {
     let payload
     try {
@@ -543,6 +600,7 @@ export async function fetchWordData(word) {
       throw error
     }
     entry = normalizeEntry(payload, word)
+    if (!lemmas.length && !skipMerriam) lemmas = candidateLemmas(word)
   }
 
   const extras = await extrasRequest
@@ -558,13 +616,40 @@ export async function fetchWordData(word) {
   const duplicateTerms = new Set([...extras.phrases, ...extras.variants].map((item) => item.toLowerCase()))
   const value = {
     entry,
+    lemmas,
     extras: {
       ...extras,
       related: extras.related.filter((item) => !synonymSet.has(item.toLowerCase()) && !duplicateTerms.has(item.toLowerCase())),
     },
   }
-  writeCache(word, value)
+  writeCache(cacheKey, value)
   return value
+}
+
+// 查询单词，并在它是变形时自动定位到原形词条。
+// 返回 { data, redirectFrom }：redirectFrom 是用户原始输入的变形词。
+export async function lookupWord(word) {
+  const data = await fetchWordData(word)
+  let lemmas = Array.isArray(data.lemmas) ? data.lemmas : []
+
+  if (lemmas.length > 1) {
+    const known = await loadCommonWords()
+    if (known.size) lemmas = orderLemmas(lemmas, (candidate) => known.has(candidate))
+  }
+
+  for (const lemma of lemmas) {
+    if (!lemma || lemma === word) continue
+    // MW 已经把原形词条返回了（bigger → big），不需要再请求一次。
+    if (data.entry.word === lemma) return { data, redirectFrom: word }
+    try {
+      const base = await fetchWordData(lemma)
+      if (base?.entry) return { data: base, redirectFrom: word }
+    } catch {
+      // 猜出来的原形不存在时继续尝试下一个候选。
+    }
+  }
+
+  return { data, redirectFrom: null }
 }
 
 function hashSenseKey(value) {
@@ -631,13 +716,36 @@ export async function fetchSenseRelations(definition, synonyms = [], antonyms = 
   return value
 }
 
-export async function fetchSuggestions(word) {
+export async function fetchSuggestionWords(word, max = 6) {
   try {
-    const results = await fetchJson(`${DATAMUSE_ENDPOINT}/sug?s=${encodeURIComponent(word)}&max=6`)
-    return results.map((item) => item.word).filter(Boolean).slice(0, 6)
+    const results = await fetchJson(
+      `${DATAMUSE_ENDPOINT}/sug?s=${encodeURIComponent(word)}&max=${Math.max(1, Math.min(20, max))}`,
+    )
+    return results
+      .map((item) => item?.word)
+      .filter((item) => typeof item === 'string' && item.trim())
+      .slice(0, max)
   } catch {
     return []
   }
+}
+
+export async function fetchSuggestions(word) {
+  return fetchSuggestionWords(word, 6)
+}
+
+// 已经查过并缓存过的词，可以作为离线拼写纠错的候选。
+export function getCachedWords() {
+  const words = []
+  try {
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index)
+      if (!key || !key.startsWith(CACHE_PREFIX)) continue
+      const word = key.slice(CACHE_PREFIX.length).toLowerCase()
+      if (word) words.push(word)
+    }
+  } catch {}
+  return words
 }
 
 export function getRecentSearches() {
@@ -648,6 +756,14 @@ export function getRecentSearches() {
 
 export function addRecentSearch(word) {
   const next = uniqueWords([word, ...getRecentSearches()]).slice(0, RECENT_LIMIT)
+  writeStorage(RECENT_KEY, next)
+  return next
+}
+
+export function replaceRecentSearches(words) {
+  const next = uniqueWords(
+    (Array.isArray(words) ? words : []).filter((word) => typeof word === 'string'),
+  ).slice(0, RECENT_LIMIT)
   writeStorage(RECENT_KEY, next)
   return next
 }

@@ -123,3 +123,38 @@ export function ExternalIcon({ size = 14 }) {
     </svg>
   )
 }
+
+export function SettingsIcon({ size = 16 }) {
+  return (
+    <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M4 7h9M17 7h3M4 17h3M11 17h9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="15" cy="7" r="2.2" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="9" cy="17" r="2.2" stroke="currentColor" strokeWidth="1.6" />
+    </svg>
+  )
+}
+
+export function UserIcon({ size = 16 }) {
+  return (
+    <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="8" r="3.5" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M5.2 19.2a6.8 6.8 0 0 1 13.6 0" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+export function CheckIcon({ size = 14 }) {
+  return (
+    <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="m5 12.5 4.2 4.2L19 6.8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export function StarIcon({ size = 16, filled = false }) {
+  return (
+    <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'}>
+      <path d="M12 3.7l2.55 5.17 5.7.83-4.12 4.02.97 5.68L12 16.72l-5.1 2.68.97-5.68L3.75 9.7l5.7-.83z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+    </svg>
+  )
+}

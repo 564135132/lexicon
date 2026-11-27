@@ -10,11 +10,15 @@
     "dev": "vite --host 127.0.0.1",
     "app:dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "vite build",
+    "check:supabase": "node scripts/check-supabase.mjs",
+    "check:session": "node scripts/session-persistence-e2e.mjs",
+    "check:session:web": "node scripts/session-persistence-web.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "desktop:pack": "npm run build && node scripts/build-desktop.mjs dir",
     "desktop:build": "npm run build && node scripts/build-desktop.mjs nsis"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.2",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tesseract.js": "^7.0.0"

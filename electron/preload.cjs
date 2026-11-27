@@ -16,4 +16,9 @@ contextBridge.exposeInMainWorld('desktopApp', {
   captureRegion: () => ipcRenderer.invoke('capture:select-region'),
   onFloatingQuery: (callback) => subscribe('floating:query', callback),
   onLookupWord: (callback) => subscribe('lookup:word', callback),
+  authStorage: {
+    getItem: (key) => ipcRenderer.invoke('auth-storage:get', key),
+    setItem: (key, value) => ipcRenderer.invoke('auth-storage:set', key, value),
+    removeItem: (key) => ipcRenderer.invoke('auth-storage:remove', key),
+  },
 })
